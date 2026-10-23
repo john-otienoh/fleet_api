@@ -1,0 +1,517 @@
+# Fleet Analytics API: Endpoint Reference
+
+This document lists every proposed endpoint, its parameters, what it returns and who may see it. It is a design contract: the OpenAPI file is written from it, and the two must be kept in step.
+
+## 2. Endpoint index
+
+| # | Method | Path | Purpose | Access | Release |
+|---|---|---|---|---|---|
+| 1 | GET | `/v1/health` | Liveness: the process is running | Operational | v1.0 |
+| 2 | GET | `/v1/health/ready` | Readiness: a valid data snapshot is loaded | Operational | v1.0 |
+| 3 | GET | `/v1/meta` | Data freshness and record counts | Public | v1.0 |
+| 4 | GET | `/v1/meta/data-quality` | Detailed data-quality findings | Internal | v1.0 |
+| 5 | GET | `/v1/summary` | Headline KPIs for the top of the page | Public | v1.0 |
+| 6 | GET | `/v1/fleet/breakdown/{dimension}` | Aircraft counts by any fleet dimension | Public | v1.0 |
+| 7 | GET | `/v1/fleet/cross-tab` | Count matrix across two dimensions | Public | v1.0 |
+| 8 | GET | `/v1/fleet/manufacturers` | Manufacturers with counts | Public | v1.0 |
+| 9 | GET | `/v1/fleet/manufacturers/{manufacturer}` | Family and variant drill-down (for example Cessna) | Public | v1.0 |
+| 10 | GET | `/v1/aircraft-types` | Aircraft type catalogue with counts | Public | v1.0 |
+| 11 | GET | `/v1/aircraft-types/{type_id}` | One aircraft type | Public | v1.0 |
+| 12 | GET | `/v1/members` | Member list | Public | v1.0 |
+| 13 | GET | `/v1/members/{member_id}` | One member | Public | v1.0 |
+| 14 | GET | `/v1/members/{member_id}/fleet` | One member's fleet grouped by type | Public | v1.0 |
+| 15 | GET | `/v1/aircraft` | Individual aircraft with registrations | Gated | v1.0 |
+| 16 | GET | `/v1/aircraft/{registration}` | One individual aircraft | Gated | v1.0 |
+| 17 | GET | `/v1/valuations/summary` | Total estimated fleet value (range) | Gated | v1.0 |
+| 18 | GET | `/v1/valuations/breakdown/{dimension}` | Estimated value by dimension | Gated | v1.0 |
+| 19 | GET | `/v1/valuations/methodology` | Assumptions, disclaimer and review date | Gated | v1.0 |
+| 20 | GET | `/v1/reference/dimensions` | List of dimensions the page can group or filter by | Public | v1.0 |
+| 21 | GET | `/v1/reference/dimensions/{dimension}/values` | Allowed values for one dimension | Public | v1.0 |
+| 22 | GET | `/v1/movements` | Wilson Airport flight movements | Public | later |
+| 23 | GET | `/v1/movements/summary` | Movement totals for a period | Public | later |
+| 24 | GET | `/v1/movements/by-hour` | Movements by hour of day | Public | later |
+| 25 | GET | `/v1/movements/breakdown/{dimension}` | Movements by airline, destination, and so on | Public | later |
+| 26 | GET | `/v1/movements/by-member` | Movements matched to KAAO members | Public | later |
+
+**Provided by the framework (not part of the contract):**
+
+| Path | Note |
+|---|---|
+| `/openapi.json`, `/docs`, `/redoc` | Internal. Disable in production or restrict access, because the contract lives in the repository. |
+| `HEAD` and `OPTIONS` on every path | `HEAD` mirrors `GET` without a body. `OPTIONS` serves browser CORS preflight. |
+
+---
+
+## 3. Conventions that apply to every endpoint
+
+### 3.1 General
+
+- **Methods:** `GET`, `HEAD`, `OPTIONS` only. Anything else returns `405 Method Not Allowed` with an `Allow` header.
+- **Format:** JSON, UTF-8. JSON field names are `snake_case`. Path segments are lowercase `kebab-case`. Slugs and IDs are lowercase.
+- **Versioning:** the `/v1` prefix stays for compatible changes (adding fields or endpoints). A breaking change means `/v2`.
+- **Time:** ISO 8601 in UTC, for example `2026-10-23T06:00:00Z`.
+- **Authentication:** none in the public design. The auth model is an open decision (section 8). Endpoints are written so that adding a key requirement at a proxy changes no paths and no payloads.
+
+### 3.2 Response envelope
+
+Every successful response is a JSON object with these top-level members.
+
+| Member | Present on | Description |
+|---|---|---|
+| `data` | all | The payload. An object, or a list of objects. |
+| `meta` | all data endpoints | `snapshot_id`, `data_as_of`, `source_modified_at`, `api_version` (see 4.3). |
+| `pagination` | list endpoints | `total`, `limit`, `offset`, `has_more`. |
+
+The health endpoints return a small status object and no `meta`.
+
+### 3.3 Counting rules (apply to every count in the API)
+
+- A count is a number of **aircraft** (airframes), not rows in the workbook.
+- Duplicated workbook rows and aircraft registered twice are counted once.
+- A type listed with no fleet number is counted as 1 aircraft and flagged `assumed`. Responses expose how much of any total is assumed (`aircraft_assumed`, or `assumed_count` on items) so the page can show or hide it.
+- Members with no aircraft listed have `fleet_reported: false`. They are never shown as zero.
+- Leased aircraft are included; a `leased` flag is kept on individual aircraft records.
+
+### 3.4 Value formats
+
+| Kind | Format |
+|---|---|
+| Counts | Integers |
+| Shares | Decimals from 0 to 1, four decimal places |
+| Money | USD millions as numbers, with `currency: "USD"` and `unit: "millions"`. Always a range (`low`, `high`, `mid`) and always `is_estimate: true`. |
+| Missing data | `null`, never `0`, plus an explicit flag where it matters (`fleet_reported`) |
+
+### 3.5 Query parameters
+
+| Rule | Detail |
+|---|---|
+| Filters | Whitelisted per endpoint. Several values are comma-separated (`category=fixed_wing,rotary_wing`). |
+| Unknown parameters | Rejected with `422`, so typos are caught rather than silently ignored. |
+| Unknown filter values | `422`, with the allowed values listed in the error. |
+| Sorting | `sort` takes whitelisted fields, comma-separated. A leading `-` means descending (`sort=-aircraft_count,name`). |
+| Search | `q` is 2 to 50 characters, case-insensitive. |
+| Pagination | List endpoints take `limit` (default 25, maximum 100) and `offset` (default 0). Aggregate endpoints are not paginated. |
+
+### 3.6 Shared fleet filters
+
+These filters are accepted by `/v1/fleet/breakdown/{dimension}`, `/v1/fleet/cross-tab`, `/v1/aircraft-types`, `/v1/aircraft` and the valuation endpoints, unless an endpoint says otherwise.
+
+| Parameter | Values |
+|---|---|
+| `category` | See section 6 |
+| `propulsion` | See section 6 |
+| `engine_count` | See section 6 |
+| `size_class` | See section 6 |
+| `role` | See section 6 |
+| `manufacturer` | Manufacturer slug, for example `cessna` |
+| `family` | Family slug, for example `caravan` |
+| `segment` | See section 6 |
+| `registration_origin` | See section 6 |
+| `member_id` | One or more member IDs |
+| `type_id` | One or more aircraft type IDs |
+
+### 3.7 Errors
+
+All errors use the RFC 9457 problem-details format (`application/problem+json`).
+
+| Member | Description |
+|---|---|
+| `type` | A stable identifier for the error kind |
+| `title` | Short human-readable summary |
+| `status` | HTTP status code |
+| `detail` | Explanation for this occurrence |
+| `instance` | The request path |
+| `request_id` | Matches the `X-Request-ID` response header |
+| `errors` | On `422` only: a list of `parameter`, `message` and `allowed_values` |
+
+Internal details (stack traces, file names, workbook contents) are never included.
+
+| Status | When |
+|---|---|
+| 200 | Success |
+| 304 | The `If-None-Match` value matches the current `ETag` |
+| 404 | Unknown ID, slug or registration, or a gated endpoint that is switched off |
+| 405 | Method other than `GET`, `HEAD`, `OPTIONS` |
+| 422 | Invalid or unknown parameter or value |
+| 429 | Rate limit exceeded; `Retry-After` is set |
+| 500 | Unexpected server error (generic message) |
+| 503 | No valid data snapshot is loaded yet, or the snapshot is too old to serve |
+
+### 3.8 Caching, rate limits and CORS
+
+- **ETag:** every data response carries an `ETag` derived from the snapshot and the request. A matching `If-None-Match` returns `304`.
+- **Cache-Control:** data endpoints use `public, max-age=300` as a starting value, tuned to the sync schedule. Health endpoints use `no-store`.
+- **Response headers:** `X-Request-ID` on every response and `X-Data-As-Of` on data responses.
+- **Rate limit:** a starting value of 120 requests per minute per client IP, to be tuned once the page's real call pattern is known.
+- **CORS:** `Access-Control-Allow-Origin` allows only `https://kaao.co.ke` in production (plus the staging origin in staging). Methods `GET`, `HEAD`, `OPTIONS`. No credentials. CORS restricts browsers only; it is not a security control on its own.
+
+---
+
+## 4. Operational and meta endpoints
+
+### 4.1 `GET /v1/health`
+**Access:** Operational. **Purpose:** liveness. Returns `status: "ok"` if the process is running. Does not touch data. Never cached.
+
+### 4.2 `GET /v1/health/ready`
+**Access:** Operational. **Purpose:** readiness. Returns `200` with `status: "ready"` when a valid snapshot is loaded, otherwise `503`. Used by the host or load balancer to decide whether to send traffic.
+
+### 4.3 `GET /v1/meta`
+**Access:** Public. **Purpose:** tells the page how fresh the data is, so it can show "Data as of ...".
+
+| Field | Description |
+|---|---|
+| `snapshot_id` | Identifier of the snapshot being served |
+| `data_as_of` | When the last successful sync finished |
+| `source_modified_at` | When the workbook itself was last changed |
+| `sync_status` | `ok` or `stale` |
+| `stale_after` | The age at which the data is considered stale |
+| `record_counts` | `members`, `members_with_fleet`, `aircraft_types`, `aircraft` (and `movements` once built) |
+| `data_quality_warning_count` | Number of open warnings (details are internal) |
+| `api_version` | For example `1.0.0` |
+
+### 4.4 `GET /v1/meta/data-quality`
+**Access:** Internal (disabled in production unless explicitly approved). **Purpose:** the maintainer's view of problems found in the workbook.
+
+| Field | Description |
+|---|---|
+| `findings` | List of findings |
+| `findings[].code` | For example `duplicate_registration`, `registration_conflict`, `type_unmapped`, `blank_fleet_count`, `invalid_registration_format`, `missing_member_segment` |
+| `findings[].severity` | `info`, `warning` or `error` |
+| `findings[].entity` | `member`, `fleet_row` or `aircraft` |
+| `findings[].count` | Number of affected records |
+| `findings[].description` | What is wrong and how it was handled |
+
+---
+
+## 5. Data endpoints
+
+### 5.1 Summary
+
+#### `GET /v1/summary`
+**Access:** Public. **Feeds:** KPI cards. **Parameters:** none.
+
+| Field | Description |
+|---|---|
+| `members_total` | All member AOCs in the workbook |
+| `members_with_fleet_reported` | Members with at least one aircraft listed |
+| `members_without_fleet` | Members with none listed |
+| `aircraft_total` | All aircraft counted |
+| `aircraft_stated` | Counted from a stated fleet number |
+| `aircraft_assumed` | Counted as 1 because no fleet number was given |
+| `aircraft_type_count` | Distinct normalized aircraft types |
+| `manufacturer_count` | Distinct manufacturers |
+| `category_counts` | `fixed_wing`, `rotary_wing`, `lighter_than_air` |
+| `aircraft_with_registration` | Aircraft with a valid registration on file |
+| `kenyan_registered` | Of those, how many carry a Kenyan (`5Y`) registration |
+
+### 5.2 Fleet analysis
+
+#### `GET /v1/fleet/breakdown/{dimension}`
+**Access:** Public. **Feeds:** donut charts, bar charts, "top fleets per operator". One endpoint serves every standard breakdown, so the OpenAPI file stays small.
+
+**Path parameter:** `dimension`, one of `category`, `propulsion`, `engine_count`, `size_class`, `role`, `manufacturer`, `family`, `aircraft_type`, `segment`, `registration_origin`, `member`.
+
+| Parameter | Description |
+|---|---|
+| Shared fleet filters | See 3.6 |
+| `limit` | Top N items. Defaults to all for short dimensions and to 10 for `manufacturer`, `family`, `aircraft_type` and `member`. Maximum 50. |
+| `include_other` | `true` adds one `other` item that sums everything beyond `limit`. Default `false`. |
+| `sort` | `-count` (default) or `label` |
+
+| `data` field | Description |
+|---|---|
+| `dimension` | The requested dimension |
+| `total` | Sum of all counts in the selection |
+| `total_assumed` | How much of `total` is assumed |
+| `items[].key` | Stable machine value (for example `turboprop`) |
+| `items[].label` | Display text (for example `Turboprop`) |
+| `items[].count` | Number of aircraft |
+| `items[].share` | Count divided by `total` |
+| `items[].assumed_count` | How much of this count is assumed |
+
+**Errors:** `404` for an unknown dimension; `422` for a bad filter.
+
+#### `GET /v1/fleet/cross-tab`
+**Access:** Public. **Feeds:** the segment-by-category heatmap.
+
+| Parameter | Description |
+|---|---|
+| `rows` | Dimension for the rows (required) |
+| `columns` | Dimension for the columns (required, must differ from `rows`) |
+| Shared fleet filters | See 3.6 |
+
+Allowed dimensions: `category`, `propulsion`, `engine_count`, `size_class`, `role`, `manufacturer` (top 10), `segment`, `registration_origin`. The `member` and `aircraft_type` dimensions are excluded because they would produce too many cells.
+
+| `data` field | Description |
+|---|---|
+| `rows`, `columns` | Lists of `key` and `label` |
+| `matrix` | Counts, one list per row, in the same order as `columns` |
+| `row_totals`, `column_totals` | Totals per row and per column |
+| `total` | Grand total |
+
+#### `GET /v1/fleet/manufacturers`
+**Access:** Public. **Feeds:** manufacturer bar chart and the entry point to the drill-down. Not paginated (a small, bounded list).
+
+| Parameter | Description |
+|---|---|
+| `category` | Optional filter |
+| `sort` | `-aircraft_count` (default), `name` |
+
+| `data` item field | Description |
+|---|---|
+| `manufacturer` | Slug, for example `de-havilland-canada` |
+| `name` | Display name |
+| `aircraft_count` | Aircraft of this manufacturer |
+| `family_count` | Number of families |
+| `type_count` | Number of normalized types |
+| `member_count` | Members that operate any of them |
+
+#### `GET /v1/fleet/manufacturers/{manufacturer}`
+**Access:** Public. **Feeds:** the Cessna drill-down (Caravan, piston singles, piston twin, Citation jets) and the same view for any manufacturer.
+
+| `data` field | Description |
+|---|---|
+| `manufacturer`, `name`, `aircraft_count` | As above |
+| `families[]` | `family`, `name`, `aircraft_count` |
+| `families[].variants[]` | `type_id`, `display_name`, `aircraft_count` |
+| `top_operators[]` | Up to 10 of `member_id`, `name`, `aircraft_count` |
+
+**Errors:** `404` for an unknown manufacturer.
+
+### 5.3 Aircraft types
+
+#### `GET /v1/aircraft-types`
+**Access:** Public. **Feeds:** the type catalogue table. Paginated.
+
+| Parameter | Description |
+|---|---|
+| Shared fleet filters | See 3.6 (`type_id` is not needed here) |
+| `q` | Search display name |
+| `sort` | `display_name` (default), `-aircraft_count`, `-member_count`, `manufacturer` |
+| `limit`, `offset` | Pagination |
+
+| `data` item field | Description |
+|---|---|
+| `type_id` | Stable identifier |
+| `display_name` | For example `Dash 8-400` |
+| `manufacturer`, `family`, `variant` | Classification |
+| `category`, `propulsion`, `engine_count`, `size_class`, `role` | Classification (section 6) |
+| `aircraft_count` | Aircraft of this type in the fleet |
+| `member_count` | Members operating it |
+| `unit_value_low`, `unit_value_high` | Present only when valuations are enabled (Gated) |
+
+#### `GET /v1/aircraft-types/{type_id}`
+**Access:** Public. Same fields as the list, plus `operators[]` (`member_id`, `name`, `aircraft_count`). **Errors:** `404` for an unknown type.
+
+### 5.4 Members
+
+#### `GET /v1/members`
+**Access:** Public. **Feeds:** the member table and "top fleets". Paginated.
+
+| Parameter | Description |
+|---|---|
+| `segment` | Filter by operator segment |
+| `category` | Members that operate at least one aircraft of that category |
+| `fleet_reported` | `true` or `false` |
+| `q` | Search by name |
+| `sort` | `name` (default), `-aircraft_count`, `-type_count` |
+| `limit`, `offset` | Pagination |
+
+| `data` item field | Description |
+|---|---|
+| `member_id` | Stable identifier assigned in the workbook |
+| `name` | Member AOC name |
+| `segment` | Operator segment (section 6) |
+| `fleet_reported` | Whether any aircraft are listed |
+| `aircraft_count` | `null` when `fleet_reported` is false |
+| `type_count` | Distinct types operated |
+| `category_counts` | `fixed_wing`, `rotary_wing`, `lighter_than_air` |
+
+#### `GET /v1/members/{member_id}`
+**Access:** Public. Same fields as the list, plus `aircraft_assumed` (how much of the member's count is assumed). **Errors:** `404` for an unknown member.
+
+#### `GET /v1/members/{member_id}/fleet`
+**Access:** Public. **Feeds:** a member's fleet composition chart or table. Not paginated.
+
+| `data` item field | Description |
+|---|---|
+| `type_id`, `display_name` | The aircraft type |
+| `manufacturer`, `family`, `category`, `propulsion` | Classification |
+| `aircraft_count` | Aircraft of this type at this member |
+| `count_basis` | `stated` or `assumed` |
+
+**Errors:** `404` for an unknown member. A member with `fleet_reported: false` returns `200` with an empty list.
+
+### 5.5 Individual aircraft (Gated)
+
+Gated because registrations identify individual aircraft. KAAO decides whether they appear on the page.
+
+#### `GET /v1/aircraft`
+**Access:** Gated. Paginated. Only aircraft with a valid registration appear; the rest are counted in the fleet endpoints but have no record here.
+
+| Parameter | Description |
+|---|---|
+| Shared fleet filters | See 3.6 |
+| `q` | Registration prefix search, for example `5Y-S` |
+| `sort` | `registration` (default), `display_name`, `member_name` |
+| `limit`, `offset` | Pagination |
+
+| `data` item field | Description |
+|---|---|
+| `registration` | Normalized, for example `5Y-ABC` |
+| `registration_origin` | Country code derived from the prefix, or `unknown` |
+| `type_id`, `display_name` | The aircraft type |
+| `member_id`, `member_name` | The operator |
+| `category` | Classification |
+| `leased` | `true` where the workbook marks it leased |
+| `data_flags` | For example `registration_conflict` |
+
+#### `GET /v1/aircraft/{registration}`
+**Access:** Gated. One aircraft, same fields as the list. **Errors:** `404` for an unknown registration, and `422` for a malformed one.
+
+### 5.6 Estimated valuations (Gated)
+
+Gated because the figures are indicative estimates, not appraisals, and may be commercially sensitive. Every response here carries `is_estimate: true`, `currency: "USD"`, `unit: "millions"` and a `methodology_version`.
+
+#### `GET /v1/valuations/summary`
+
+| `data` field | Description |
+|---|---|
+| `total` | `low`, `high`, `mid` |
+| `by_category` | The same three values for fixed wing, rotary wing and lighter-than-air |
+| `aircraft_counted` | Aircraft included in the estimate |
+| `aircraft_assumed` | How many of those are assumed |
+| `excluded_or_flagged` | Items flagged as needing verification and the value they contribute |
+
+#### `GET /v1/valuations/breakdown/{dimension}`
+**Path parameter:** `dimension`, one of `category`, `group`, `manufacturer`, `segment`, `aircraft_type`, `member`. The `member` dimension should stay disabled even if the rest are approved, unless KAAO explicitly agrees to publish per-member values.
+
+| Parameter | Description |
+|---|---|
+| Shared fleet filters | See 3.6 |
+| `limit`, `include_other`, `sort` | As for the fleet breakdown. `sort` also accepts `-mid`. |
+
+| `data` item field | Description |
+|---|---|
+| `key`, `label` | The group |
+| `aircraft_count` | Aircraft in the group |
+| `value` | `low`, `high`, `mid` |
+| `share_of_mid` | Share of the total midpoint |
+
+#### `GET /v1/valuations/methodology`
+
+| `data` field | Description |
+|---|---|
+| `methodology_version` | Changes whenever unit values or rules change |
+| `last_reviewed_at` | When the unit value ranges were last reviewed |
+| `assumptions[]` | Plain-language assumptions |
+| `disclaimer` | Text the page must display next to any value |
+
+### 5.7 Reference data
+
+#### `GET /v1/reference/dimensions`
+**Access:** Public. **Feeds:** the page's filter and grouping menus. Returns each dimension with its `key`, `label`, and which endpoints accept it (`fleet_breakdown`, `cross_tab`, `valuations`, `movements`).
+
+#### `GET /v1/reference/dimensions/{dimension}/values`
+**Access:** Public. Returns the allowed `key` and `label` pairs for one dimension, in display order. **Errors:** `404` for an unknown dimension.
+
+### 5.8 Wilson Airport movements (later)
+
+Designed now so the shared aircraft-type lookup can serve both data sets. The source columns are Time, Flight, To, Airline, Aircraft, Gate, Runway and Status. The source, refresh cadence and date handling are open decisions (section 8).
+
+#### `GET /v1/movements`
+Paginated.
+
+| Parameter | Description |
+|---|---|
+| `date_from`, `date_to` | Inclusive dates; required, with a maximum span (default 31 days) |
+| `airline`, `destination`, `aircraft_type`, `runway`, `status` | Filters |
+| `sort` | `-scheduled_at` (default), `airline`, `destination` |
+| `limit`, `offset` | Pagination |
+
+| `data` item field | Description |
+|---|---|
+| `scheduled_at` | Full timestamp (date plus the source's time) |
+| `flight` | Flight number |
+| `destination` | Destination as given |
+| `airline` | Airline as given |
+| `aircraft_raw` | Aircraft text as it appears in the source |
+| `type_id` | Mapped aircraft type, or `null` if unmapped |
+| `gate`, `runway`, `status` | As given |
+| `member_id` | Matched KAAO member, or `null` |
+
+#### `GET /v1/movements/summary`
+Totals for the period: `movements_total`, `by_day` (date and count), `busiest_day`, `busiest_hour`. Parameters: `date_from`, `date_to` and the filters above.
+
+#### `GET /v1/movements/by-hour`
+Counts for hours 0 to 23, optionally split by weekday. Parameters: the same period and filters, and `split_by_weekday` (`true` or `false`).
+
+#### `GET /v1/movements/breakdown/{dimension}`
+**Path parameter:** `dimension`, one of `airline`, `destination`, `aircraft_type`, `runway`, `status`. Same response shape as the fleet breakdown (`total`, `items[]` with `key`, `label`, `count`, `share`). Parameters: period, filters, `limit`, `include_other`.
+
+#### `GET /v1/movements/by-member`
+Movements matched to KAAO members through an airline-to-member mapping table, which must be built and maintained. Returns `member_id`, `name`, `movements`, and `unmatched_total` so the page can show how much traffic could not be matched.
+
+---
+
+## 6. Dimension reference
+
+These are the proposed allowed values. The `key` is the machine value used in URLs and responses.
+
+| Dimension | Keys |
+|---|---|
+| `category` | `fixed_wing`, `rotary_wing`, `lighter_than_air` |
+| `propulsion` | `piston`, `turboprop`, `turbofan`, `turboshaft`, `none` |
+| `engine_count` | `single`, `twin`, `four`, `none` (balloons) |
+| `size_class` | `light_ga`, `regional_turboprop`, `regional_jet`, `narrowbody`, `widebody`, `business_jet`, `helicopter` (light and medium), `balloon` |
+| `role` | `passenger`, `cargo`, `vip_business`, `utility_safari`, `training` (extend with `agricultural` if the Air Tractor and Thrush aircraft are kept as their own role) |
+| `segment` | `scheduled_airline`, `regional_commuter`, `cargo`, `charter_safari`, `ngo_humanitarian`, `balloon_safari`, `helicopter`, `training` (more may be added when members are assigned, for example agricultural or government and wildlife) |
+| `registration_origin` | ISO country codes derived from the registration prefix (`KE` for `5Y`, `US` for `N`, `MW` for `7Q`, `SM` for `T7`), plus `unknown` |
+| `manufacturer`, `family`, `aircraft_type`, `member` | Open lists. Use `/v1/reference/dimensions/{dimension}/values`. |
+
+**Fleet dimensions** (`/v1/fleet/breakdown`): `category`, `propulsion`, `engine_count`, `size_class`, `role`, `manufacturer`, `family`, `aircraft_type`, `segment`, `registration_origin`, `member`.
+
+**Valuation dimensions** (`/v1/valuations/breakdown`): `category`, `group`, `manufacturer`, `segment`, `aircraft_type`, `member`.
+
+**Movement dimensions** (`/v1/movements/breakdown`): `airline`, `destination`, `aircraft_type`, `runway`, `status`.
+
+---
+
+## 7. Page element to endpoint map (starting point)
+
+| Page element | Endpoint |
+|---|---|
+| "Data as of" label | `/v1/meta` |
+| KPI cards | `/v1/summary` |
+| Fixed wing, rotary, balloon chart | `/v1/fleet/breakdown/category` |
+| Propulsion and size charts | `/v1/fleet/breakdown/propulsion`, `/v1/fleet/breakdown/size_class` |
+| Top fleets per operator | `/v1/fleet/breakdown/member?limit=10` |
+| Manufacturer chart and Cessna drill-down | `/v1/fleet/manufacturers`, `/v1/fleet/manufacturers/cessna` |
+| Segment by category heatmap | `/v1/fleet/cross-tab?rows=segment&columns=category` |
+| Member table and detail | `/v1/members`, `/v1/members/{member_id}/fleet` |
+| Type catalogue | `/v1/aircraft-types` |
+| Estimated value panel (if approved) | `/v1/valuations/summary`, `/v1/valuations/methodology` |
+| Filter menus | `/v1/reference/dimensions` and its values endpoint |
+| Wilson movements panels (later) | `/v1/movements/summary`, `/v1/movements/by-hour` |
+
+---
+
+## 8. Open decisions that affect this document
+
+1. **Gated groups:** which of individual aircraft (registrations), valuation summary, valuations by type, and valuations by member may go live. Per-member values are the most sensitive.
+2. **Auth model:** a public read-only API, or a server-side proxy that adds a key. This changes no endpoint, but it decides whether `Access-Control-Allow-Origin` is needed at all.
+3. **Framework docs:** whether `/docs` and `/openapi.json` are public, restricted, or off in production.
+4. **Member IDs:** the stable ID scheme assigned in the workbook (the sheet's row numbers are not stable).
+5. **Segments and roles:** who assigns each member to a segment, and whether extra segments or roles are needed.
+6. **Assumed counts:** whether the page shows, footnotes, or hides aircraft counted on assumption.
+7. **Unresolved data conflicts:** for example one registration listed under two different types. Until KAAO confirms, both are counted and flagged.
+8. **Cache and rate numbers:** `max-age`, the stale threshold and the rate limit are starting values to tune against the sync schedule and the page's real call pattern.
+9. **Wilson movements:** data source, refresh cadence, how the date is obtained (the source has a time only), how long to retain history, and who maintains the airline-to-member mapping.
+
+---
+
+## 9. Change log
+
+| Version | Date | Change |
+|---|---|---|
+| 0.1 | 2026-10-23 | First draft: 26 endpoints (21 for the core release, 5 for Wilson movements later) |
